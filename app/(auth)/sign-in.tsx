@@ -1,3 +1,4 @@
+import Button from "@/components/ui/button";
 import { useSignIn } from "@clerk/expo";
 import { type Href, Link, useRouter } from "expo-router";
 import React from "react";
@@ -102,13 +103,13 @@ export default function Page() {
             {errors.fields.code.message}
           </Text>
         )}
-        <Pressable
-          className={`p-3 rounded mt-4 ${fetchStatus === "fetching" ? "bg-blue-300" : "bg-blue-500"}`}
+        <Button
+          className="mt-4"
           onPress={handleVerify}
           disabled={fetchStatus === "fetching"}
         >
           <Text className="text-white text-center font-semibold">Verify</Text>
-        </Pressable>
+        </Button>
         <Pressable className="mt-4" onPress={() => signIn.mfa.sendEmailCode()}>
           <Text className="text-blue-500 text-center">Resend code</Text>
         </Pressable>
@@ -136,15 +137,15 @@ export default function Page() {
         onChangeText={(password) => setPassword(password)}
       />
 
-      <Pressable
-        className={`p-3 rounded mt-4 ${!emailAddress || !password || fetchStatus === "fetching" ? "bg-blue-300" : "bg-blue-500"}`}
+      <Button
+        className="mt-4"
         onPress={handleSubmit}
         disabled={!emailAddress || !password || fetchStatus === "fetching"}
       >
         <Text className="text-white text-center font-semibold text-lg">
           Continue
         </Text>
-      </Pressable>
+      </Button>
 
       <View className="flex-row justify-center mt-6">
         <Text className="text-gray-600">No account? </Text>
