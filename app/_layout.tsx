@@ -1,9 +1,12 @@
+import { NAV_THEME } from "@/lib/theme";
 import { ClerkProvider } from "@clerk/expo";
 import { tokenCache } from "@clerk/expo/token-cache";
+import { ThemeProvider } from "@react-navigation/native";
+import { PortalHost } from "@rn-primitives/portal";
 import { Slot } from "expo-router";
+import { StatusBar } from "expo-status-bar";
+import { useColorScheme, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-
-import { View } from "react-native";
 import "../global.css";
 
 const publishableKey = process.env.EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY!;
@@ -13,13 +16,19 @@ if (!publishableKey) {
 }
 
 export default function RootLayout() {
+  let colorScheme = useColorScheme();
+  console.log(colorScheme);
   return (
     <ClerkProvider publishableKey={publishableKey} tokenCache={tokenCache}>
-      <SafeAreaView>
-        <View className=" min-h-screen">
-          <Slot />
-        </View>
-      </SafeAreaView>
+      <ThemeProvider value={NAV_THEME[colorScheme!]}>
+        <StatusBar style="light" />
+        <SafeAreaView>
+          <View className="min-h-screen bg-white dark:bg-black ">
+            <Slot />
+          </View>
+        </SafeAreaView>
+        <PortalHost />
+      </ThemeProvider>
     </ClerkProvider>
   );
 }

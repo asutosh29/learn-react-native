@@ -1,17 +1,19 @@
-import Button from "@/components/ui/button";
+import Button from "@/components/ui/button.bak";
 import { Link, Slot } from "expo-router";
 import React from "react";
 import { View } from "react-native";
 
 export default function AuthLayout() {
   return (
-    <View className="p-8">
-      <Button variant="ghost" className="mb-4">
-        <Link href={"/"} className="text-white">
-          Back to Home
-        </Link>
-      </Button>
+    <View className="flex justify-between p-8 h-screen">
       <Slot />
+      <View className="flex">
+        <Button variant="primary" className="mb-4 inline-block">
+          <Link href={"/"} className="text-white">
+            Home!
+          </Link>
+        </Button>
+      </View>
     </View>
   );
 }
