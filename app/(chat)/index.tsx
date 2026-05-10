@@ -1,34 +1,21 @@
-import { ChatHeader } from "@/components/chat/chat-header";
-import { ChatTranscript } from "@/components/chat/chat-transcript";
 import { Composer } from "@/components/chat/composer";
+import { EventTranscript } from "@/components/chat/event-transcript";
 import type { BadgeProps } from "@/components/ui/badge";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Text } from "@/components/ui/text";
+import {
+  AgentService,
+  type AgentEvent,
+  type AgentEventType,
+  type RenderItem,
+} from "@/lib/AgentService";
+import { MockAgentTest } from "@/lib/MockAgentTest";
 import { Link } from "expo-router";
-import React, { useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { View } from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
 import EventSource from "react-native-sse";
-
-type MessageRole = "user" | "assistant" | "system";
-
-type Message = {
-  id: string;
-  role: MessageRole;
-  content: string;
-  timestamp: number;
-  status?: "streaming" | "done" | "error";
-  title?: string;
-  meta?: string;
-};
-
-type StreamEventEnvelope = {
-  id: string;
-  timestamp: string;
-  parentId?: string | null;
-  ephemeral?: boolean;
-  type: string;
-  data: Record<string, unknown>;
-};
 
 const STREAM_EVENT_TYPES = [
   "assistant.turn_start",
@@ -77,30 +64,9 @@ const STREAM_EVENT_TYPES = [
   "command.completed",
 ];
 
-const EPHEMERAL_EVENT_TYPES = new Set([
-  "assistant.intent",
-  "assistant.reasoning_delta",
-  "assistant.message_delta",
-  "assistant.streaming_delta",
-  "assistant.usage",
-  "tool.execution_partial_result",
-  "tool.execution_progress",
-  "session.idle",
-  "session.title_changed",
-  "session.usage_info",
-  "permission.requested",
-  "permission.completed",
-  "user_input.requested",
-  "user_input.completed",
-  "elicitation.requested",
-  "elicitation.completed",
-  "external_tool.requested",
-  "external_tool.completed",
-  "exit_plan_mode.requested",
-  "exit_plan_mode.completed",
-  "command.queued",
-  "command.completed",
-]);
+const LOG_TRUNCATE_LIMIT = 280;
+type StreamMode = "real" | "mock";
+type ActiveStreamHandle = { stop: () => void } | null;
 
 function makeId() {
   return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -108,15 +74,16 @@ function makeId() {
 
 export default function Chat() {
   const [input, setInput] = useState("");
-  const [messages, setMessages] = useState<Message[]>([]);
+  const [items, setItems] = useState<RenderItem[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
   const [hasError, setHasError] = useState(false);
-  const assistantMessageMap = useRef(new Map<string, string>());
-  const reasoningMessageMap = useRef(new Map<string, string>());
-  const reasoningContentMap = useRef(new Map<string, string>());
-  const toolCallNameMap = useRef(new Map<string, string>());
-  const toolOutputMap = useRef(new Map<string, string>());
-  const eventMessageMap = useRef(new Map<string, string>());
+  const [timelineMode, setTimelineMode] = useState(false);
+  const [streamMode, setStreamMode] = useState<StreamMode>(
+    __DEV__ ? "mock" : "real",
+  );
+  const agentServiceRef = useRef<AgentService | null>(null);
+  const mockAgentRef = useRef<MockAgentTest | null>(null);
+  const activeStreamRef = useRef<ActiveStreamHandle>(null);
   const legacyMessageIdRef = useRef<string | null>(null);
   const trimmedInput = input.trim();
   const statusLabel = hasError ? "Error" : isStreaming ? "Streaming" : "Ready";
@@ -128,259 +95,95 @@ export default function Chat() {
 
   const eventTypes = useMemo(() => STREAM_EVENT_TYPES, []);
 
-  const toTimestamp = (timestamp: string | number) => {
-    if (typeof timestamp === "number") return timestamp;
-    const parsed = Date.parse(timestamp);
-    return Number.isNaN(parsed) ? Date.now() : parsed;
-  };
-
-  const truncate = (value: string, limit = 600) =>
-    value.length > limit ? `${value.slice(0, limit)}...` : value;
-
-  const formatJson = (value: unknown) => {
-    if (!value) return "";
-    try {
-      return JSON.stringify(value, null, 2);
-    } catch {
-      return String(value);
+  const agentService = useMemo(() => {
+    if (!agentServiceRef.current) {
+      agentServiceRef.current = new AgentService();
     }
+    return agentServiceRef.current;
+  }, []);
+
+  useEffect(() => agentService.subscribe(setItems), [agentService]);
+  useEffect(
+    () => () => {
+      activeStreamRef.current?.stop();
+      activeStreamRef.current = null;
+    },
+    [],
+  );
+
+  const stopActiveStream = () => {
+    activeStreamRef.current?.stop();
+    activeStreamRef.current = null;
   };
 
-  const upsertEventMessage = (key: string, message: Message) => {
-    setMessages((prev) => {
-      const existingId = eventMessageMap.current.get(key);
-      if (!existingId) {
-        eventMessageMap.current.set(key, message.id);
-        return [...prev, message];
-      }
-      return prev.map((item) =>
-        item.id === existingId
-          ? {
-              ...item,
-              content: message.content,
-              timestamp: message.timestamp,
-              status: message.status,
-              title: message.title,
-              meta: message.meta,
-            }
-          : item,
-      );
-    });
-  };
-
-  const handleAssistantDelta = (messageId: string, delta: string) => {
-    const localId = assistantMessageMap.current.get(messageId) ?? makeId();
-    assistantMessageMap.current.set(messageId, localId);
-    setMessages((prev) =>
-      prev.map((message) =>
-        message.id === localId
-          ? {
-              ...message,
-              content: message.content + delta,
-              status: "streaming",
-              timestamp: Date.now(),
-            }
-          : message,
-      ),
-    );
-  };
-
-  const ensureAssistantMessage = (messageId: string, timestamp: number) => {
-    const localId = assistantMessageMap.current.get(messageId);
-    if (localId) return localId;
-    const newId = makeId();
-    assistantMessageMap.current.set(messageId, newId);
-    setMessages((prev) => [
-      ...prev,
-      {
-        id: newId,
-        role: "assistant",
-        content: "",
-        timestamp,
-        status: "streaming",
-      },
-    ]);
-    return newId;
-  };
-
-  const handleStreamEvent = (event: StreamEventEnvelope) => {
-    const timestamp = toTimestamp(event.timestamp);
-    const isEphemeral =
-      event.ephemeral ?? EPHEMERAL_EVENT_TYPES.has(event.type);
-    const baseMessage: Message = {
-      id: `event-${event.id}`,
-      role: "system" as const,
-      timestamp,
-      status: isEphemeral ? "streaming" : "done",
-      title: event.type,
-      meta: isEphemeral ? "ephemeral" : undefined,
-      content: "",
-    };
-
+  const updateStatus = (event: AgentEvent) => {
     switch (event.type) {
-      case "assistant.message_delta": {
-        const messageId = String(event.data.messageId ?? "");
-        const delta = String(event.data.deltaContent ?? "");
-        if (!messageId || !delta) return;
-        ensureAssistantMessage(messageId, timestamp);
-        handleAssistantDelta(messageId, delta);
-        return;
-      }
-      case "assistant.message": {
-        const messageId = String(event.data.messageId ?? "");
-        const content = String(event.data.content ?? "");
-        if (messageId) {
-          const localId = ensureAssistantMessage(messageId, timestamp);
-          setMessages((prev) =>
-            prev.map((message) =>
-              message.id === localId
-                ? { ...message, content, status: "done", timestamp }
-                : message,
-            ),
-          );
-        }
-        if (event.data.toolRequests) {
-          const toolRequests = formatJson(event.data.toolRequests);
-          if (toolRequests) {
-            upsertEventMessage(`toolRequests:${event.id}`, {
-              ...baseMessage,
-              content: truncate(`Tool requests:\n${toolRequests}`),
-            });
-          }
-        }
-        return;
-      }
-      case "assistant.reasoning_delta": {
-        const reasoningId = String(event.data.reasoningId ?? "");
-        const delta = String(event.data.deltaContent ?? "");
-        if (!reasoningId || !delta) return;
-        const nextContent = `${reasoningContentMap.current.get(reasoningId) ?? ""}${delta}`;
-        reasoningContentMap.current.set(reasoningId, nextContent);
-        const localId =
-          reasoningMessageMap.current.get(reasoningId) ?? makeId();
-        reasoningMessageMap.current.set(reasoningId, localId);
-        upsertEventMessage(`reasoning:${reasoningId}`, {
-          ...baseMessage,
-          id: localId,
-          content: truncate(nextContent),
-          title: "assistant.reasoning_delta",
-        });
-        return;
-      }
-      case "assistant.reasoning": {
-        const reasoningId = String(event.data.reasoningId ?? "");
-        const content = String(event.data.content ?? "");
-        if (!reasoningId) return;
-        reasoningContentMap.current.set(reasoningId, content);
-        upsertEventMessage(`reasoning:${reasoningId}`, {
-          ...baseMessage,
-          id: reasoningMessageMap.current.get(reasoningId) ?? makeId(),
-          content: truncate(content),
-          title: "assistant.reasoning",
-          status: "done",
-        });
-        return;
-      }
-      case "tool.execution_start": {
-        const toolCallId = String(event.data.toolCallId ?? "");
-        const toolName = String(event.data.toolName ?? "tool");
-        if (toolCallId) toolCallNameMap.current.set(toolCallId, toolName);
-        upsertEventMessage(`tool:${toolCallId || event.id}`, {
-          ...baseMessage,
-          content: `Tool ${toolName} started.`,
-        });
-        return;
-      }
-      case "tool.execution_partial_result": {
-        const toolCallId = String(event.data.toolCallId ?? "");
-        const toolName = toolCallNameMap.current.get(toolCallId) ?? "tool";
-        const partial = String(event.data.partialOutput ?? "");
-        const nextContent = `${toolOutputMap.current.get(toolCallId) ?? ""}${partial}`;
-        toolOutputMap.current.set(toolCallId, nextContent);
-        upsertEventMessage(`tool:${toolCallId || event.id}`, {
-          ...baseMessage,
-          content: truncate(`Tool ${toolName} output:\n${nextContent}`),
-        });
-        return;
-      }
-      case "tool.execution_progress": {
-        const toolCallId = String(event.data.toolCallId ?? "");
-        const toolName = toolCallNameMap.current.get(toolCallId) ?? "tool";
-        const progress = String(event.data.progressMessage ?? "");
-        toolOutputMap.current.set(toolCallId, progress);
-        upsertEventMessage(`tool:${toolCallId || event.id}`, {
-          ...baseMessage,
-          content: `Tool ${toolName}: ${progress}`,
-        });
-        return;
-      }
-      case "tool.execution_complete": {
-        const toolCallId = String(event.data.toolCallId ?? "");
-        const toolName = toolCallNameMap.current.get(toolCallId) ?? "tool";
-        const success = Boolean(event.data.success);
-        const result = event.data.result as Record<string, unknown> | undefined;
-        const error = event.data.error as Record<string, unknown> | undefined;
-        const content = success
-          ? truncate(String(result?.detailedContent ?? result?.content ?? ""))
-          : String(error?.message ?? "Unknown error");
-        upsertEventMessage(`tool:${toolCallId || event.id}`, {
-          ...baseMessage,
-          content: success
-            ? `Tool ${toolName} complete. ${content}`
-            : `Tool ${toolName} failed: ${content}`,
-          status: success ? "done" : "error",
-        });
-        return;
-      }
-      case "session.error": {
-        setHasError(true);
-        upsertEventMessage(`session.error:${event.id}`, {
-          ...baseMessage,
-          content: `Session error: ${String(event.data.message ?? "Unknown")}`,
-        });
-        return;
-      }
-      case "assistant.turn_start": {
+      case "assistant.turn_start":
         setIsStreaming(true);
-        const turnId = String(event.data.turnId ?? "");
-        upsertEventMessage(`assistant.turn:${turnId || event.id}`, {
-          ...baseMessage,
-          content: `Turn ${turnId || "started"} started.`,
-        });
-        return;
-      }
-      case "assistant.turn_end": {
-        const turnId = String(event.data.turnId ?? "");
-        upsertEventMessage(`assistant.turn:${turnId || event.id}`, {
-          ...baseMessage,
-          content: `Turn ${turnId || ""} ended.`,
-          status: "done",
-        });
-        return;
-      }
-      case "session.idle": {
+        setHasError(false);
+        break;
+      case "assistant.turn_end":
+      case "session.idle":
         setIsStreaming(false);
-        upsertEventMessage(`session.idle:${event.id}`, {
-          ...baseMessage,
-          content: "Session idle.",
-        });
-        return;
-      }
-      default: {
-        const dataText = formatJson(event.data);
-        upsertEventMessage(`${event.type}:${event.id}`, {
-          ...baseMessage,
-          content: truncate(dataText || event.type),
-        });
-      }
+        break;
+      case "session.error":
+        setIsStreaming(false);
+        setHasError(true);
+        break;
+      default:
+        break;
     }
+  };
+
+  const coerceEvent = (
+    eventType: string,
+    payload: Record<string, unknown>,
+    timestamp?: string,
+    id?: string,
+  ): AgentEvent | null => {
+    if (!STREAM_EVENT_TYPES.includes(eventType)) return null;
+    return {
+      id: id ?? makeId(),
+      timestamp: timestamp ?? new Date().toISOString(),
+      parentId: null,
+      type: eventType as AgentEventType,
+      data: payload as never,
+    } as AgentEvent;
   };
 
   const parseEvent = (eventType: string, data: string) => {
     if (!data) return;
-    let parsed: StreamEventEnvelope | null = null;
+
+    const truncateLogValue = (value: string, limit = LOG_TRUNCATE_LIMIT) =>
+      value.length > limit ? `${value.slice(0, limit)}...` : value;
+    const logIncomingEvent = (type: string, payload: unknown) => {
+      let serialized = "";
+      try {
+        serialized = JSON.stringify(payload);
+      } catch {
+        serialized = String(payload);
+      }
+      console.log(
+        `[SSE EVENT] ${type}`,
+        truncateLogValue(serialized || String(payload)),
+      );
+    };
+
+    let parsed: {
+      type?: string;
+      data?: Record<string, unknown>;
+      timestamp?: string;
+      id?: string;
+      parentId?: string | null;
+    } | null = null;
     try {
-      const value = JSON.parse(data) as StreamEventEnvelope;
+      const value = JSON.parse(data) as {
+        type?: string;
+        data?: Record<string, unknown>;
+        timestamp?: string;
+        id?: string;
+        parentId?: string | null;
+      };
       if (value && typeof value.type === "string" && value.data) {
         parsed = value;
       }
@@ -389,7 +192,17 @@ export default function Chat() {
     }
 
     if (parsed) {
-      handleStreamEvent(parsed);
+      logIncomingEvent(parsed.type ?? eventType, parsed.data ?? {});
+      const event = coerceEvent(
+        parsed.type ?? eventType,
+        parsed.data ?? {},
+        parsed.timestamp,
+        parsed.id,
+      );
+      if (event) {
+        updateStatus(event);
+        agentService.ingest(event);
+      }
       return;
     }
 
@@ -400,44 +213,92 @@ export default function Chat() {
       } catch {
         payload = { raw: data };
       }
-      handleStreamEvent({
-        id: makeId(),
-        timestamp: new Date().toISOString(),
-        type: eventType,
-        data: payload,
-        ephemeral: EPHEMERAL_EVENT_TYPES.has(eventType),
-      });
+      logIncomingEvent(eventType, payload);
+      const event = coerceEvent(eventType, payload);
+      if (event) {
+        updateStatus(event);
+        agentService.ingest(event);
+      }
       return;
     }
 
     const fallbackMessageId =
       legacyMessageIdRef.current ?? `legacy-${Date.now()}`;
     legacyMessageIdRef.current = fallbackMessageId;
-    ensureAssistantMessage(fallbackMessageId, Date.now());
-    handleAssistantDelta(fallbackMessageId, data);
+    logIncomingEvent("assistant.message_delta", {
+      messageId: fallbackMessageId,
+      deltaContent: data,
+    });
+    const event = coerceEvent("assistant.message_delta", {
+      messageId: fallbackMessageId,
+      deltaContent: data,
+    });
+    if (event) {
+      updateStatus(event);
+      agentService.ingest(event);
+    }
   };
 
-  const sendMessage = () => {
-    if (!trimmedInput || isStreaming) return;
+  const emitIncomingEvent = (
+    eventType: AgentEventType | "message",
+    payload: unknown,
+    timestamp?: string,
+    id?: string,
+  ) => {
+    if (eventType === "message") {
+      const data =
+        typeof payload === "string" ? payload : JSON.stringify(payload ?? {});
+      parseEvent("message", data);
+      return;
+    }
 
-    setHasError(false);
-    setIsStreaming(true);
+    parseEvent(
+      eventType,
+      JSON.stringify({
+        id: id ?? makeId(),
+        timestamp: timestamp ?? new Date().toISOString(),
+        type: eventType,
+        data:
+          typeof payload === "object" && payload !== null
+            ? payload
+            : { value: payload },
+      }),
+    );
+  };
 
+  const startMockStream = (userInput: string) => {
+    if (!mockAgentRef.current) {
+      mockAgentRef.current = new MockAgentTest();
+    }
+    const mockHandle = mockAgentRef.current.start(
+      userInput,
+      (eventType, payload, timestamp, id) =>
+        emitIncomingEvent(eventType, payload, timestamp, id),
+      () => {
+        stopActiveStream();
+        setIsStreaming(false);
+      },
+      (error) => {
+        console.error("Mock Stream Error:", error);
+        stopActiveStream();
+        setIsStreaming(false);
+        setHasError(true);
+        const errorEvent = coerceEvent("session.error", {
+          errorType: "mock_streaming",
+          message: error.message || "Mock stream error",
+        });
+        if (errorEvent) {
+          updateStatus(errorEvent);
+          agentService.ingest(errorEvent);
+        }
+      },
+    );
+    activeStreamRef.current = { stop: mockHandle.stop };
+  };
+
+  const startRealStream = (userInput: string) => {
     // IMPORTANT: Replace with your actual VPS IP or your local IP if testing locally (e.g., 'http://192.168.1.X:3000')
     const url = "http://10.81.100.56:3000/api/chat";
-    const timestamp = Date.now();
-    legacyMessageIdRef.current = makeId();
-
-    const userMessage: Message = {
-      id: makeId(),
-      role: "user",
-      content: trimmedInput,
-      timestamp,
-      status: "done",
-    };
-
-    setMessages((prev) => [...prev, userMessage]);
-
     const es = new EventSource(url, {
       method: "POST",
       headers: {
@@ -445,12 +306,17 @@ export default function Chat() {
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        message: trimmedInput,
+        message: userInput,
         sessionId: "test-session",
       }),
     });
 
-    // Listen for text chunks
+    activeStreamRef.current = {
+      stop: () => {
+        es.close();
+      },
+    };
+
     es.addEventListener("message", (event) => {
       if (!event.data) return;
       parseEvent("message", event.data);
@@ -463,48 +329,107 @@ export default function Chat() {
       });
     });
 
-    // Listen for our custom 'end' event
     es.addEventListener("end" as never, () => {
+      stopActiveStream();
       setIsStreaming(false);
-      es.close();
     });
 
-    // Handle errors
     es.addEventListener("error", (err) => {
       console.error("SSE Connection Error:", err);
+      stopActiveStream();
       setIsStreaming(false);
       setHasError(true);
-      setMessages((prev) => {
-        const next = [...prev];
-        for (let i = next.length - 1; i >= 0; i -= 1) {
-          if (next[i]?.role === "assistant") {
-            next[i] = { ...next[i], status: "error" };
-            break;
-          }
-        }
-        return next;
+      const errorEvent = coerceEvent("session.error", {
+        errorType: "streaming",
+        message: "Stream error",
       });
-      es.close();
+      if (errorEvent) {
+        updateStatus(errorEvent);
+        agentService.ingest(errorEvent);
+      }
     });
+  };
+
+  const sendMessage = () => {
+    if (!trimmedInput || isStreaming) return;
+
+    stopActiveStream();
+    setHasError(false);
+    setIsStreaming(true);
+    const timestamp = Date.now();
+    legacyMessageIdRef.current = makeId();
+
+    const userEvent = coerceEvent(
+      "user.message",
+      {
+        content: trimmedInput,
+        source: "user",
+      },
+      new Date(timestamp).toISOString(),
+    );
+    if (userEvent) {
+      updateStatus(userEvent);
+      agentService.ingest(userEvent);
+    }
+
+    if (streamMode === "mock") {
+      startMockStream(trimmedInput);
+    } else {
+      startRealStream(trimmedInput);
+    }
 
     setInput("");
   };
 
   return (
-    <View className="flex-1 bg-background px-5 pt-12">
-      <View className="flex-1 gap-4">
-        <Link href="/(root)/(tabs)/home" asChild>
-          <Button variant="ghost" size="sm" className="self-start">
-            <Text>Back to Home</Text>
-          </Button>
-        </Link>
-        <ChatHeader
-          title="Remote Agent UI"
-          statusLabel={statusLabel}
-          statusVariant={statusVariant}
-        />
-        <View className="flex-1 gap-4">
-          <ChatTranscript messages={messages} />
+    <SafeAreaView className="flex-1 bg-background" edges={["top", "bottom"]}>
+      <View className="flex-1 px-4 pb-2 pt-2">
+        <View className="gap-3 rounded-2xl border border-border/40 bg-muted/20 px-3 py-3">
+          <View className="flex-row items-center justify-between gap-2">
+            <Link href="/(root)/(tabs)/home" asChild>
+              <Button variant="ghost" size="sm" className="h-8 px-2">
+                <Text>Back</Text>
+              </Button>
+            </Link>
+            <Badge variant={statusVariant}>
+              <Text>{statusLabel}</Text>
+            </Badge>
+          </View>
+          <View className="flex-row items-center justify-between gap-2">
+            <Text className="flex-1 text-2xl font-semibold" numberOfLines={1}>
+              Remote Agent UI
+            </Text>
+            <View className="flex-row flex-wrap items-center justify-end gap-2">
+              <Button
+                variant={streamMode === "mock" ? "secondary" : "ghost"}
+                size="sm"
+                className="h-8 min-w-24 rounded-full px-3"
+                onPress={() =>
+                  setStreamMode((mode) => (mode === "mock" ? "real" : "mock"))
+                }
+                disabled={isStreaming}
+              >
+                <Text numberOfLines={1}>
+                  {streamMode === "mock" ? "Mock" : "Real"}
+                </Text>
+              </Button>
+              <Button
+                variant={timelineMode ? "secondary" : "ghost"}
+                size="sm"
+                className="h-8 min-w-24 rounded-full px-3"
+                onPress={() => setTimelineMode((value) => !value)}
+              >
+                <Text numberOfLines={1}>{timelineMode ? "Timeline" : "Default"}</Text>
+              </Button>
+            </View>
+          </View>
+        </View>
+        <View className="flex-1 gap-3 pt-3">
+          <EventTranscript
+            items={items}
+            mode={timelineMode ? "timeline" : "default"}
+            compact
+          />
           <Composer
             value={input}
             onChange={setInput}
@@ -514,6 +439,6 @@ export default function Chat() {
           />
         </View>
       </View>
-    </View>
+    </SafeAreaView>
   );
 }

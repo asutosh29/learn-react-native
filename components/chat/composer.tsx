@@ -21,15 +21,15 @@ export function Composer({
   canSend = true,
 }: ComposerProps) {
   return (
-    <View className="gap-3">
+    <View className="rounded-2xl border border-border/100 bg-background/50 px-3 pb-3 pt-2">
       <Textarea
         value={value}
         onChangeText={onChange}
         placeholder="Type a message..."
         editable={!disabled}
-        className="min-h-20"
+        className="max-h-32 min-h-14 rounded-xl border-border/50 bg-muted text-base"
       />
-      <View className="flex-row items-center justify-end">
+      <View className="mt-2 flex-row items-center justify-end">
         <Button onPress={onSend} disabled={disabled || !canSend}>
           <Icon as={Send} size={16} />
           <Text>Send</Text>
