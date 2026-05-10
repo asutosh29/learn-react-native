@@ -1,5 +1,7 @@
+import { NAV_THEME } from "@/lib/theme";
 import { ClerkProvider } from "@clerk/expo";
 import { tokenCache } from "@clerk/expo/token-cache";
+import { ThemeProvider } from "@react-navigation/native";
 import { PortalHost } from "@rn-primitives/portal";
 import { Slot } from "expo-router";
 import { StatusBar } from "expo-status-bar";
@@ -18,13 +20,15 @@ export default function RootLayout() {
   console.log(colorScheme);
   return (
     <ClerkProvider publishableKey={publishableKey} tokenCache={tokenCache}>
-      <StatusBar style="light" />
-      <SafeAreaView>
-        <View className="min-h-screen bg-white dark:bg-background">
-          <Slot />
-        </View>
-      </SafeAreaView>
-      <PortalHost />
+      <ThemeProvider value={NAV_THEME[colorScheme ?? "light"]}>
+        <StatusBar style="auto" />
+        <SafeAreaView>
+          <View className="min-h-screen bg-white dark:bg-background">
+            <Slot />
+          </View>
+        </SafeAreaView>
+        <PortalHost />
+      </ThemeProvider>
     </ClerkProvider>
   );
 }

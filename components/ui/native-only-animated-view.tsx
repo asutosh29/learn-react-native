@@ -1,5 +1,7 @@
-import { Platform } from 'react-native';
-import Animated from 'react-native-reanimated';
+import type { ComponentPropsWithoutRef, ElementRef, ReactNode } from "react";
+import { forwardRef } from "react";
+import { Platform } from "react-native";
+import Animated from "react-native-reanimated";
 
 /**
  * This component is used to wrap animated views that should only be animated on native.
@@ -10,14 +12,21 @@ import Animated from 'react-native-reanimated';
  *   <Text>I am only animated on native</Text>
  * </NativeOnlyAnimatedView>
  */
-function NativeOnlyAnimatedView(
-  props: React.ComponentProps<typeof Animated.View> & React.RefAttributes<typeof Animated.View>
-) {
-  if (Platform.OS === 'web') {
-    return <>{props.children as React.ReactNode}</>;
-  } else {
-    return <Animated.View {...props} />;
+type NativeOnlyAnimatedViewProps = ComponentPropsWithoutRef<
+  typeof Animated.View
+>;
+
+const NativeOnlyAnimatedView = forwardRef<
+  ElementRef<typeof Animated.View>,
+  NativeOnlyAnimatedViewProps
+>((props, ref) => {
+  if (Platform.OS === "web") {
+    return <>{props.children as ReactNode}</>;
   }
-}
+
+  return <Animated.View ref={ref} {...props} />;
+});
+
+NativeOnlyAnimatedView.displayName = "NativeOnlyAnimatedView";
 
 export { NativeOnlyAnimatedView };

@@ -1,4 +1,4 @@
-import Button from "@/components/ui/button.bak";
+import { Button } from "@/components/ui/button";
 import { Text } from "@/components/ui/text";
 import { useAuth, useUser } from "@clerk/expo";
 import { useRouter } from "expo-router";

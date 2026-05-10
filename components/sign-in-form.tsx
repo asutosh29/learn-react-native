@@ -65,6 +65,8 @@ export function SignInForm() {
       }
       // TODO: Handle other statuses
       console.error(JSON.stringify(signIn, null, 2));
+      console.log(signIn.status);
+      console.log(signIn.supportedFirstFactors);
     } catch (err) {
       // See https://go.clerk.com/mRUDrIe for more info on error handling
       const message =
